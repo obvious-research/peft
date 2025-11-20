@@ -17,7 +17,7 @@ from __future__ import annotations
 import importlib
 import warnings
 from dataclasses import dataclass, field
-from typing import Literal, Optional, Union
+from typing import Literal, Optional, Union, Iterable
 
 from torch import nn
 
@@ -731,6 +731,39 @@ class LoraConfig(PeftConfig):
             )
         },
     )
+    # Terra: Time-varying LoRA (TeRRA) configuration
+    terra_type: Optional[Literal["linear", "exponential", "cosine"]] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Enable Time-varying LoRA (TeRRA) by selecting a mid matrix form: 'linear', 'exponential', or 'cosine'. "
+            )
+        },
+    )
+    terra_t_min: float = field(
+        default=0.,
+        metadata={
+            "help": (
+                "Minimum t used"
+            )
+        },
+    )
+    terra_t_max: float = field(
+        default=1.0,
+        metadata={
+            "help": (
+                "Maximum t used"
+            )
+        },
+    )
+    terra_t_dim: Optional[Iterable[int]] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Dimension of t used for time scaling. If None, t is assumed to be a scalar. "
+                "If a tuple, t is assumed to be a tensor of shape (..., *terra_t_dim).")
+        }
+    )
     target_parameters: Optional[list[str]] = field(
         default=None,
         metadata={
@@ -873,6 +906,17 @@ class LoraConfig(PeftConfig):
             warnings.warn(msg)
 
         self._custom_modules: Optional[dict[type[nn.Module], type[nn.Module]]] = None
+
+        # Basic validation for TeRRA
+        if self.terra_type is not None:
+            if self.terra_type not in ("linear", "exponential", "cosine"):
+                raise ValueError(
+                    f"Unknown terra_type '{self.terra_type}'. Expected one of: 'linear', 'exponential', 'cosine', or None."
+                )
+            if self.terra_t_max <= 0:
+                raise ValueError("terra_t_max must be > 0 when terra_type is set.")
+            if self.terra_t_max <= self.terra_t_min:
+                raise ValueError("terra_t_max must be > terra_t_min when terra_type is set.")
 
     def _register_custom_module(self, mapping: dict[type[nn.Module], type[nn.Module]]) -> None:
         """

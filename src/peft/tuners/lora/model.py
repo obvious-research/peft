@@ -20,7 +20,7 @@ import warnings
 from contextlib import contextmanager
 from dataclasses import replace
 from functools import partial, reduce
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
 import packaging.version
 import torch

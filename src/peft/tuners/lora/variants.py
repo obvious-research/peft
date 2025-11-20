@@ -612,6 +612,133 @@ class ALoraLinearVariant(LoraVariant):
         return result
 
 
+class TerraLinearVariant(LoraVariant):
+
+    @staticmethod
+    def init(module: Linear, adapter_name: str, **kwargs: Any) -> None:
+        """
+        Initialize TeRRA mid-layer and store schedule parameters.
+        Creates a learnable mid-layer M in R^{r x r} placed between A and B.
+        """
+        # Create container for TeRRA config per adapter
+        if not hasattr(module, "lora_terra"):
+            module.lora_terra = {}
+
+        r = module.r[adapter_name]
+        dtype = module.lora_A[adapter_name].weight.dtype
+        module.lora_M[adapter_name] = nn.Linear(r, r, bias=False, device=module.weight.device, dtype=dtype)
+
+        # def init M matrix
+        nn.init.xavier_uniform_(module.lora_M[adapter_name].weight)
+
+        terra_type = kwargs.get("terra_type", None)
+        terra_t_min = kwargs.get("terra_t_min", None)
+        terra_t_max = kwargs.get("terra_t_max", None)
+        terra_t_dim = kwargs.get("terra_t_dim", None)
+
+        # Fallback to sensible defaults if missing
+        if terra_t_min is None:
+            terra_t_min = 0
+        if terra_t_max is None:
+            terra_t_max = 1
+
+        module.lora_terra[adapter_name] = {
+            "type": terra_type,
+            "t_min": terra_t_min,
+            "t_max": terra_t_max,
+            "t_dim": terra_t_dim,
+        }
+
+    @staticmethod
+    def merge_safe(module: Linear, active_adapter: str, orig_weight: torch.Tensor) -> torch.Tensor:
+        # TODO: will implement, merge using a fixed t
+        raise NotImplementedError("TeRRA does not support safe merging yet")
+
+    @staticmethod
+    def merge_unsafe(module: Linear, active_adapter: str, orig_weight: torch.Tensor) -> None:
+        # TODO: will implement, merge using a fixed t
+        raise NotImplementedError("TeRRA does not support merging yet")
+
+    @staticmethod
+    def unmerge(module: Linear, active_adapter: str, orig_weight: torch.Tensor) -> torch.Tensor:
+        # TODO: will implement, unmerge given a fixed t
+        raise NotImplementedError("TeRRA does not support unmerging yet")
+
+    @staticmethod
+    def forward(
+        module: Linear,
+        active_adapter: str,
+        x: torch.Tensor,
+        result: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        # Retrieve modules
+        lora_A = module.lora_A[active_adapter]
+        lora_M = module.lora_M[active_adapter]
+        lora_B = module.lora_B[active_adapter]
+        dropout = module.lora_dropout[active_adapter]
+        scaling = module.scaling[active_adapter]
+
+        # Get terra configuration
+        terra_config = module.lora_terra[active_adapter]
+        terra_type = terra_config["type"]
+
+        t_min = terra_config["t_min"]
+        t_max = terra_config["t_max"]
+        t_dim = terra_config["t_dim"]
+
+        # Get time value from kwargs or module-level cache
+        terra_t = kwargs.get("terra_t", None)
+        if terra_t is None and hasattr(module, "_terra_t"):
+            terra_t = module._terra_t[active_adapter]
+
+        if terra_t is None:
+            warnings.warn(f"Using default t_min={t_min} for adapter {active_adapter}, set before using")
+            terra_t = t_min  # Default to minimum time
+
+        # Convert to tensor if needed and ensure it's on the right device
+        if not isinstance(terra_t, torch.Tensor):
+            terra_t = torch.tensor(terra_t, dtype=x.dtype, device=x.device)
+        else:
+            terra_t = terra_t.to(dtype=x.dtype, device=x.device)
+
+
+        # Compute time-varying middle matrix based on type
+        if terra_type == "linear":
+            # K(t) =  I + t * M
+            r = lora_M.out_features
+            identity = torch.eye(r, device=lora_M.weight.device, dtype=lora_M.weight.dtype)
+            K_t = identity + terra_t.reshape(*terra_t.shape, 1, 1) * lora_M.weight
+        elif terra_type == "exponential":
+            # K(t) = exp(t * M)
+            t_m = terra_t.reshape(*terra_t.shape, 1, 1) * lora_M.weight
+            K_t = torch.matrix_exp(t_m.to(torch.float32)).to(t_m.dtype)
+        elif terra_type == "cosine":
+            # K(t) = cos(t * M)
+            K_t = torch.cos(terra_t.reshape(*terra_t.shape, 1, 1) * lora_M.weight)
+        else:
+            raise ValueError(f"Unknown terra_type: {terra_type}")
+
+        # Forward pass: x -> A -> M(t) -> B
+        # Standard LoRA: result + scaling * B(A(dropout(x)))
+        # Terra: result + scaling * B(M(t)(A(dropout(x))))
+        x_dropped = dropout(x)
+        h = lora_A(x_dropped)  # [batch, ..., r]
+
+        # Apply time-varying middle matrix K(t)
+        # K_t is [r, r], h is [batch, ..., r]
+        # Need to do matrix multiplication on last dimension
+        original_shape = h.shape
+        h_flat = h.view(original_shape[0], -1, h.shape[-1])  # [batch, ..., r]
+        h_transformed = torch.bmm(h_flat, K_t)  # [batch, ..., r]
+        h = h_transformed.reshape(original_shape)
+        # Apply output projection
+        delta = lora_B(h) * scaling
+        return result + delta
+
+
+
+
 def calculate_alora_offsets(
     peft_config: PeftConfig, active_adapter: str, input_ids: torch.Tensor, adapter_names: Optional[list[str]] = None
 ) -> list[int]:

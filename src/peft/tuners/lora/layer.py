@@ -18,7 +18,7 @@ import math
 import warnings
 from collections.abc import Callable
 from contextlib import contextmanager
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, Iterable
 
 import torch
 import torch.distributed as dist
@@ -44,7 +44,11 @@ from peft.utils.warning import PeftWarning
 from .config import LoraConfig
 
 
-VARIANT_KWARG_KEYS = ["alora_offsets"]
+VARIANT_KWARG_KEYS = [
+    "alora_offsets",
+    # TeRRA time-related kwargs forwarded only to variants
+    "terra_t"
+]
 
 
 class LoraVariant:
@@ -99,7 +103,14 @@ class LoraVariant:
 
 class LoraLayer(BaseTunerLayer):
     # All names of layers that may contain (trainable) adapter weights
-    adapter_layer_names: tuple[str, ...] = ("lora_A", "lora_B", "lora_embedding_A", "lora_embedding_B")
+    adapter_layer_names: tuple[str, ...] = (
+        "lora_A",
+        "lora_B",
+        "lora_embedding_A",
+        "lora_embedding_B",
+        # optional mid-layer for TeRRA
+        "lora_M",
+    )
     # All names of other parameters that may contain adapter-related parameters
     other_param_names: tuple[str, ...] = ("r", "lora_alpha", "scaling", "lora_dropout")
 
@@ -111,6 +122,8 @@ class LoraLayer(BaseTunerLayer):
         self.lora_dropout = nn.ModuleDict({})
         self.lora_A = nn.ModuleDict({})
         self.lora_B = nn.ModuleDict({})
+        # Optional mid-layer used by TeRRA variant
+        self.lora_M = nn.ModuleDict({})
         # For Embedding layer
         self.lora_embedding_A = nn.ParameterDict({})
         self.lora_embedding_B = nn.ParameterDict({})
@@ -127,6 +140,10 @@ class LoraLayer(BaseTunerLayer):
         self.cast_input_dtype_enabled: bool = True
         self.lora_variant: dict[str, LoraVariant] = {}
         self.kwargs = kwargs
+        # Optional shared, runtime-provided TeRRA timestep cache
+        # If set via set_terra_t on the layer, Terra variants can pick it up when
+        # no explicit terra_t/timestep is passed through the forward kwargs.
+        self._terra_t: dict[str, Optional[torch.Tensor | int | float]] = {}
 
         base_layer = self.get_base_layer()
         in_features, out_features = self._get_in_out_features(base_layer)
@@ -180,7 +197,7 @@ class LoraLayer(BaseTunerLayer):
                 PeftWarning,
             )
 
-        lora_variant = self.resolve_lora_variant(config=config)
+        lora_variant = self.resolve_lora_variant(config=config, **kwargs)
         if lora_variant is not None:
             self.lora_variant[adapter_name] = lora_variant
 
@@ -639,6 +656,87 @@ class LoraLayer(BaseTunerLayer):
         value = self._caches.pop(key)
         return value
 
+    def set_terra_t(self, terra_t: Union[float, torch.Tensor], adapter: Optional[str] = None) -> None:
+        """
+        Set a time value or tensor to be used by Terra variants at runtime.
+
+        This method sets the time parameter that controls interpolation in Terra (time-varying LoRA)
+        adapters. The time parameter determines the blend between source domain (t=0) and target
+        domain (t=1).
+
+        Args:
+            terra_t (Union[float, torch.Tensor]):
+                The time value(s) to set. Can be:
+                - A single float value for all samples
+                - A torch.Tensor for per-sample time values
+            adapter (Optional[str]):
+                The name of the adapter to set the time for. If None, sets for all active adapters.
+
+        Example:
+            ```python
+            # Set time for all active adapters
+            layer.set_terra_t(0.5)
+
+            # Set time for a specific adapter
+            layer.set_terra_t(0.75, adapter="terra_adapter")
+
+            # Set per-sample times
+            layer.set_terra_t(torch.tensor([0.1, 0.5, 0.9]))
+            ```
+        """
+        if adapter is None:
+            # Set for all active adapters
+            for active_adapter in self.active_adapters:
+                self._terra_t[active_adapter] = terra_t
+        else:
+            # Validate that the adapter exists and is Terra-enabled
+            if hasattr(self, "lora_terra") and adapter in getattr(self, "active_adapters", {}):
+                # Store per-adapter time if needed in the future
+                # For now, use the layer-level cache
+                self._terra_t[adapter] = terra_t
+            else:
+                warnings.warn(
+                    f"Adapter '{adapter}' does not exist or is not a Terra adapter. "
+                    f"Available Terra adapters: {list(getattr(self, 'lora_terra', {}).keys())}",
+                    PeftWarning,
+                )
+
+    def clear_terra_t(self, adapter: Optional[str] = None) -> None:
+        """
+        Reset the terra_t value to None, allowing Terra variants to use their default behavior.
+
+        When terra_t is cleared, Terra adapters will use the minimum time value (t_min) from their
+        configuration as the default.
+
+        Args:
+            adapter (Optional[str]):
+                The name of the adapter to clear the time for. If None, clears for all adapters.
+
+        Example:
+            ```python
+            # Clear time for all adapters
+            layer.clear_terra_t()
+
+            # Clear time for a specific adapter
+            layer.clear_terra_t(adapter="terra_adapter")
+            ```
+        """
+        if adapter is None:
+            # Clear for all adapter
+            for active_adapter in self.active_adapters:
+                self._terra_t[active_adapter] = None
+        else:
+            # Validate that the adapter exists
+            if hasattr(self, "lora_terra") and adapter in getattr(self, "active_adapters", {}):
+                # Clear layer-level cache
+                self._terra_t[adapter] = None
+            else:
+                warnings.warn(
+                    f"Adapter '{adapter}' does not exist or is not a Terra adapter. "
+                    f"Available Terra adapters: {list(getattr(self, 'lora_terra', {}).keys())}",
+                    PeftWarning,
+                )
+
     def set_scale(self, adapter: str, scale: float | int) -> None:
         """Set the scale of the given adapter to the initial scale multiplied by the provided factor
 
@@ -802,6 +900,14 @@ class Linear(nn.Module, LoraLayer):
             from .variants import BdLoraLinearVariant
 
             return BdLoraLinearVariant()
+
+        terra_type = kwargs.get("terra_type", config.terra_type)
+        if terra_type is not None:
+            if config.use_dora:
+                raise ValueError("TeRRA cannot be combined with DoRA in the same layer.")
+            from .variants import TerraLinearVariant
+
+            return TerraLinearVariant()
 
         use_alora = config.alora_invocation_tokens is not None
         if not config.use_dora and not use_alora:
@@ -2478,6 +2584,13 @@ def dispatch_default(
         target_base_layer = target.get_base_layer()
     else:
         target_base_layer = target
+
+    # Inject TeRRA config into kwargs so downstream constructors can resolve variants
+    if getattr(config, "terra_type", None) is not None:
+        kwargs.setdefault("terra_type", config.terra_type)
+        kwargs.setdefault("terra_t_dim", config.terra_t_dim)
+        kwargs.setdefault("terra_t_min", config.terra_t_min)
+        kwargs.setdefault("terra_t_max", config.terra_t_max)
 
     if parameter_name is not None:
         new_module = ParamWrapper(target, adapter_name, parameter_name=parameter_name, config=config, **kwargs)
