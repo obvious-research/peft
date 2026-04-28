@@ -732,11 +732,12 @@ class LoraConfig(PeftConfig):
         },
     )
     # Terra: Time-varying LoRA (TeRRA) configuration
-    terra_type: Optional[Literal["linear", "exponential", "cosine"]] = field(
+    terra_type: Optional[Literal["linear", "linear_no_identity", "exponential", "cosine"]] = field(
         default=None,
         metadata={
             "help": (
-                "Enable Time-varying LoRA (TeRRA) by selecting a mid matrix form: 'linear', 'exponential', or 'cosine'. "
+                "Enable Time-varying LoRA (TeRRA) by selecting a mid matrix form: 'linear', "
+                "'linear_no_identity', 'exponential', or 'cosine'. "
             )
         },
     )
@@ -909,9 +910,10 @@ class LoraConfig(PeftConfig):
 
         # Basic validation for TeRRA
         if self.terra_type is not None:
-            if self.terra_type not in ("linear", "exponential", "cosine"):
+            if self.terra_type not in ("linear", "linear_no_identity", "exponential", "cosine"):
                 raise ValueError(
-                    f"Unknown terra_type '{self.terra_type}'. Expected one of: 'linear', 'exponential', 'cosine', or None."
+                    f"Unknown terra_type '{self.terra_type}'. Expected one of: 'linear', 'linear_no_identity', "
+                    "'exponential', 'cosine', or None."
                 )
             if self.terra_t_max <= 0:
                 raise ValueError("terra_t_max must be > 0 when terra_type is set.")

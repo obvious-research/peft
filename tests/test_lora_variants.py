@@ -28,6 +28,7 @@ from peft.tuners.lora.variants import (
     DoraConv2dVariant,
     DoraEmbeddingVariant,
     DoraLinearVariant,
+    TerraLinearVariant,
     calculate_alora_offsets,
     get_alora_offsets_for_forward,
     get_alora_offsets_for_generate,
@@ -85,6 +86,15 @@ class DummyLM(nn.Module):
         return self.linear(embeds)
 
 
+class SimpleTerraModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.linear = nn.Linear(3, 2, bias=False)
+
+    def forward(self, x, **kwargs):
+        return self.linear(x, **kwargs)
+
+
 class MockTransformerWrapper:
     """Mock class to behave like a transformers model.
 
@@ -112,6 +122,9 @@ VARIANT_MAP = {
     "alora": {
         LoraLinear: ALoraLinearVariant,
     },
+    "terra": {
+        LoraLinear: TerraLinearVariant,
+    },
 }
 
 
@@ -125,6 +138,11 @@ TEST_CASES = [
         "alora",
         LoraConfig,
         {"target_modules": ["linear1", "linear2"], "alora_invocation_tokens": [1]},
+    ),
+    (
+        "terra",
+        LoraConfig,
+        {"target_modules": ["linear1", "linear2"], "terra_type": "linear_no_identity"},
     ),
 ]
 
@@ -173,6 +191,47 @@ class TestLoraVariants:
 
         for layer in layer_names:
             assert getattr(peft_model.base_model.model, layer).lora_magnitude_vector["default"].weight.grad is not None
+
+
+class TestTerraLora:
+    @pytest.mark.parametrize(
+        "terra_type, include_identity",
+        [
+            ("linear", True),
+            ("linear_no_identity", False),
+        ],
+    )
+    def test_linear_no_identity_uses_raw_t_m_matrix(self, terra_type, include_identity):
+        peft_config = LoraConfig(
+            target_modules=["linear"],
+            r=2,
+            lora_alpha=2,
+            init_lora_weights=False,
+            terra_type=terra_type,
+        )
+        peft_model = get_peft_model(SimpleTerraModel(), peft_config)
+        layer = peft_model.base_model.model.linear
+
+        with torch.no_grad():
+            layer.base_layer.weight.zero_()
+            layer.lora_A["default"].weight.copy_(torch.tensor([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]))
+            layer.lora_M["default"].weight.copy_(torch.tensor([[2.0, 3.0], [5.0, 7.0]]))
+            layer.lora_B["default"].weight.copy_(torch.eye(2))
+
+        x = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+
+        for terra_t in (torch.tensor([0.0, 2.0]), torch.tensor(2.0)):
+            h = x @ layer.lora_A["default"].weight.T
+            k_t = terra_t.reshape(*terra_t.shape, 1, 1) * layer.lora_M["default"].weight
+            if include_identity:
+                k_t = k_t + torch.eye(2).reshape(1, 2, 2)
+            if k_t.dim() == 2:
+                k_t = k_t.unsqueeze(0).expand(h.shape[0], -1, -1)
+            expected = torch.bmm(h.unsqueeze(1), k_t).squeeze(1) @ layer.lora_B["default"].weight.T
+
+            output = peft_model(x, terra_t=terra_t)
+
+            assert torch.allclose(output, expected)
 
 
 class TestActivatedLora:

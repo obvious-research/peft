@@ -709,6 +709,9 @@ class TerraLinearVariant(LoraVariant):
             r = lora_M.out_features
             identity = torch.eye(r, device=lora_M.weight.device, dtype=lora_M.weight.dtype)
             K_t = identity + terra_t.reshape(*terra_t.shape, 1, 1) * lora_M.weight
+        elif terra_type == "linear_no_identity":
+            # K(t) = t * M
+            K_t = terra_t.reshape(*terra_t.shape, 1, 1) * lora_M.weight
         elif terra_type == "exponential":
             # K(t) = exp(t * M)
             t_m = terra_t.reshape(*terra_t.shape, 1, 1) * lora_M.weight
@@ -730,6 +733,10 @@ class TerraLinearVariant(LoraVariant):
         # Need to do matrix multiplication on last dimension
         original_shape = h.shape
         h_flat = h.view(original_shape[0], -1, h.shape[-1])  # [batch, ..., r]
+        if K_t.dim() == 2:
+            K_t = K_t.unsqueeze(0).expand(h_flat.shape[0], -1, -1).contiguous()
+        elif K_t.dim() == 3 and (K_t.shape[0] == 1) and (h_flat.shape[0] != 1):
+            K_t = K_t.expand(h_flat.shape[0], -1, -1).contiguous()
         h_transformed = torch.bmm(h_flat, K_t)  # [batch, ..., r]
         h = h_transformed.reshape(original_shape)
         # Apply output projection
