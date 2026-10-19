@@ -650,7 +650,6 @@ class ALoraLinearVariant(LoraVariant):
 
 
 class TerraLinearVariant(LoraVariant):
-
     @staticmethod
     def init(module: Linear, adapter_name: str, **kwargs: Any) -> None:
         """
@@ -739,7 +738,6 @@ class TerraLinearVariant(LoraVariant):
         else:
             terra_t = terra_t.to(dtype=x.dtype, device=x.device)
 
-
         # Compute time-varying middle matrix based on type
         if terra_type == "linear":
             # K(t) =  I + t * M
@@ -779,8 +777,6 @@ class TerraLinearVariant(LoraVariant):
         # Apply output projection
         delta = lora_B(h) * scaling
         return result + delta
-
-
 
 
 def calculate_alora_offsets(

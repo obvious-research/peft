@@ -19,7 +19,7 @@ import math
 import warnings
 from collections.abc import Callable
 from contextlib import contextmanager
-from typing import Any, Optional, Union, Iterable
+from typing import Any, Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -51,7 +51,7 @@ from .config import LoraConfig
 VARIANT_KWARG_KEYS = [
     "alora_offsets",
     # TeRRA time-related kwargs forwarded only to variants
-    "terra_t"
+    "terra_t",
 ]
 
 

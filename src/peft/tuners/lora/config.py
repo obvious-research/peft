@@ -17,8 +17,9 @@ from __future__ import annotations
 import dataclasses
 import importlib
 import warnings
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Literal, Optional, Union, Iterable
+from typing import Literal, Optional, Union
 
 from torch import nn
 
@@ -949,28 +950,21 @@ class LoraConfig(PeftConfig):
         },
     )
     terra_t_min: float = field(
-        default=0.,
-        metadata={
-            "help": (
-                "Minimum t used"
-            )
-        },
+        default=0.0,
+        metadata={"help": ("Minimum t used")},
     )
     terra_t_max: float = field(
         default=1.0,
-        metadata={
-            "help": (
-                "Maximum t used"
-            )
-        },
+        metadata={"help": ("Maximum t used")},
     )
     terra_t_dim: Optional[Iterable[int]] = field(
         default=None,
         metadata={
             "help": (
                 "Dimension of t used for time scaling. If None, t is assumed to be a scalar. "
-                "If a tuple, t is assumed to be a tensor of shape (..., *terra_t_dim).")
-        }
+                "If a tuple, t is assumed to be a tensor of shape (..., *terra_t_dim)."
+            )
+        },
     )
     target_parameters: Optional[list[str]] = field(
         default=None,
