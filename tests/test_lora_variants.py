@@ -365,7 +365,7 @@ class TestTerraLora:
             h = x @ layer.lora_A["default"].weight.T
             k_t = terra_t.reshape(*terra_t.shape, 1, 1) * layer.lora_M["default"].weight
             if include_identity:
-                k_t = k_t + torch.eye(2).reshape(1, 2, 2)
+                k_t = k_t + torch.eye(2)
             if k_t.dim() == 2:
                 k_t = k_t.unsqueeze(0).expand(h.shape[0], -1, -1)
             expected = torch.bmm(h.unsqueeze(1), k_t).squeeze(1) @ layer.lora_B["default"].weight.T
